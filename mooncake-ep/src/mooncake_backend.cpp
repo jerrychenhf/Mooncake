@@ -54,29 +54,30 @@ MooncakeBackend::MooncakeBackend(
     }
 
     if (isCpu) {
+        std::string location = "cpu:" + std::to_string(deviceId_);
         for (size_t i = 0; i < 2; i++) {
             int rc = engine_.registerLocalMemory(buffer->cpuSendBuffer_[i],
-                                                 kBufferSize);
+                                                 kBufferSize, location);
             TORCH_CHECK(!rc, REGISTER_BUFFER_ERROR_MSG);
         }
 
         for (size_t i = 0; i < 2; i++) {
             int rc = engine_.registerLocalMemory(buffer->cpuRecvBuffer_[i],
-                                                 kBufferSize);
+                                                 kBufferSize, location);
             TORCH_CHECK(!rc, REGISTER_BUFFER_ERROR_MSG);
         }
 
         for (size_t i = 0; i < 2; i++) {
             int rc = engine_.registerLocalMemory(buffer->cpuSyncSendRegion_[i],
                                                  kMaxNumRanks * sizeof(int32_t),
-                                                 kWildcardLocation);
+                                                 location);
             TORCH_CHECK(!rc, REGISTER_BUFFER_ERROR_MSG);
         }
 
         for (size_t i = 0; i < 2; i++) {
             int rc = engine_.registerLocalMemory(buffer->cpuSyncRecvRegion_[i],
                                                  kMaxNumRanks * sizeof(int32_t),
-                                                 kWildcardLocation);
+                                                 location);
             TORCH_CHECK(!rc, REGISTER_BUFFER_ERROR_MSG);
         }
     } else {
