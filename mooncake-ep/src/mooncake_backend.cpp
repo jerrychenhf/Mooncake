@@ -108,19 +108,6 @@ MooncakeBackend::MooncakeBackend(
         }
     }
 
-    auto matrix = engine_.getLocalTopology()->getMatrix();
-    for (auto pair : matrix) {
-        printf("[%d] topo: %s %s\n", rank, pair.first.c_str(), pair.second.name.c_str());
-        auto preferred_hca = pair.second.preferred_hca;
-        for (auto hca : preferred_hca) {
-            printf("[%d]    preferred: %s\n", rank, hca.c_str());
-        }
-        auto avail_hca = pair.second.avail_hca;
-        for (auto hca : avail_hca) {
-            printf("[%d]    avail: %s\n", rank, hca.c_str());
-        }
-    }
-
     // Sync metadata
     store->set("server_name_" + std::to_string(rank), localServerName);
 
