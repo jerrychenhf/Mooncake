@@ -1316,7 +1316,7 @@ pybind11::object DistributedObjectStore::get_tensor(const std::string &key) {
     try {
         // Section with GIL released
         py::gil_scoped_release release_gil;
-        auto buffer_handle = store_.get_buffer(key);
+        auto buffer_handle = get_buffer(key);
         if (!buffer_handle) {
             py::gil_scoped_acquire acquire_gil;
             return pybind11::none();
