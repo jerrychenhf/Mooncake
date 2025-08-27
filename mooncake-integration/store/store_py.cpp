@@ -362,14 +362,14 @@ uint64_t calculate_total_size(const Replica::Descriptor &replica) {
 
 int allocateSlices(std::vector<Slice> &slices,
                    const Replica::Descriptor &replica,
-                   BufferHandle &buffer_handle) {
+                   char * buffer) {
     uint64_t offset = 0;
     if (replica.is_memory_replica() == false) {
         // For disk-based replica, split into slices based on file size
         uint64_t total_length = replica.get_disk_descriptor().file_size;
         while (offset < total_length) {
             auto chunk_size = std::min(total_length - offset, kMaxSliceSize);
-            void *chunk_ptr = static_cast<char *>(buffer_handle.ptr()) + offset;
+            void *chunk_ptr = buffer + offset;
             slices.emplace_back(Slice{chunk_ptr, chunk_size});
             offset += chunk_size;
         }
@@ -378,12 +378,19 @@ int allocateSlices(std::vector<Slice> &slices,
         // descriptors
         for (auto &handle :
              replica.get_memory_descriptor().buffer_descriptors) {
-            void *chunk_ptr = static_cast<char *>(buffer_handle.ptr()) + offset;
+            void *chunk_ptr = buffer + offset;
             slices.emplace_back(Slice{chunk_ptr, handle.size_});
             offset += handle.size_;
         }
     }
     return 0;
+}
+
+int allocateSlices(std::vector<Slice> &slices,
+                   const Replica::Descriptor &replica,
+                   BufferHandle &buffer_handle) {
+    return allocateSlices(
+        slices, replica, static_cast<char *>(buffer_handle.ptr()));
 }
 
 tl::expected<void, ErrorCode> DistributedObjectStore::put_internal(
@@ -1323,6 +1330,68 @@ int DistributedObjectStore::put_from_with_metadata(const std::string &key, void 
     return 0;
 }
 
+tl::expected<char*, ErrorCode>
+DistributedObjectStore::get_into_allocated_internal(
+    const std::string &key, uint64_t& data_length) {
+    // Query object info first
+    auto query_result = client_->Query(key);
+    if (!query_result) {
+        LOG(ERROR) << "Query failed: " << query_result.error();
+        return tl::unexpected(query_result.error());
+    }
+
+    auto replica_list = query_result.value();
+    if (replica_list.empty()) {
+        LOG(INFO) << "No replicas found for key: " << key;
+        return tl::unexpected(ErrorCode::INVALID_KEY);
+    }
+
+    const auto &replica = replica_list[0];
+    uint64_t total_length = calculate_total_size(replica);
+    if (total_length == 0) {
+        LOG(ERROR) << "Zero length value for key: " << key;
+        return tl::unexpected(ErrorCode::INVALID_KEY);
+    }
+
+    // Create contiguous buffer to read data
+    char *data_ptr = new char[total_length];
+    if (!data_ptr) {
+        LOG(ERROR) << "Failed to allocate memory for length: " << total_length;
+        return tl::unexpected(ErrorCode::INTERNAL_ERROR);
+    }
+
+    // register the buffer
+    auto register_result = register_buffer_internal(
+        reinterpret_cast<void *>(data_ptr), total_length);
+    if (!register_result) {
+        LOG(ERROR) << "Failed to register buffer";
+        return tl::unexpected(register_result.error());
+    }
+
+    // Create slices for the allocated buffer
+    std::vector<Slice> slices;
+    allocateSlices(slices, replica, data_ptr);
+
+    // Get the object data
+    auto get_result = client_->Get(key, replica_list, slices);
+
+    // unregister the buffer for whatever cases
+    auto unregister_result =
+            unregister_buffer_internal(reinterpret_cast<void *>(data_ptr));
+    if (!unregister_result) {
+        LOG(WARNING) << "Failed to unregister buffer after put_tensor";
+    }
+
+    if (!get_result) {
+        delete[] data_ptr;
+        LOG(ERROR) << "Get failed for key: " << key;
+        return tl::unexpected(get_result.error());
+    }
+
+    // return the data ptr transferring the ownership to the caller
+    data_length = total_length;
+    return data_ptr;
+}
 
 pybind11::object DistributedObjectStore::get_tensor(const std::string &key) {
     if (!client_) {
@@ -1333,24 +1402,16 @@ pybind11::object DistributedObjectStore::get_tensor(const std::string &key) {
     try {
         // Section with GIL released
         py::gil_scoped_release release_gil;
-        auto buffer_handle = get_buffer(key);
-        if (!buffer_handle) {
+        uint64_t total_length = 0;
+        auto get_result = get_into_allocated_internal(key, total_length);
+        if (!get_result) {
             py::gil_scoped_acquire acquire_gil;
             return pybind11::none();
         }
+        auto exported_data = *get_result;
 
-        // Create contiguous buffer and copy data
-        auto total_length = buffer_handle->size();
-        char *exported_data = new char[total_length];
-        if (!exported_data) {
-            py::gil_scoped_acquire acquire_gil;
-            LOG(ERROR) << "Invalid data format: insufficient data for metadata";
-            return pybind11::none();
-        }
+        // Copy metadata from buffer
         TensorMetadata metadata;
-
-        // Copy data from buffer to contiguous memory
-        memcpy(exported_data, buffer_handle->ptr(), total_length);
         memcpy(&metadata, exported_data, sizeof(TensorMetadata));
 
         if(metadata.ndim < 0 || metadata.ndim > 4) {
@@ -1380,8 +1441,10 @@ pybind11::object DistributedObjectStore::get_tensor(const std::string &key) {
         // Convert bytes to tensor using torch.from_numpy
         pybind11::object np_array;
         int dtype_index = static_cast<int>(dtype_enum);
-        if (dtype_index >= 0 && dtype_index < static_cast<int>(array_creators.size())) {
-            np_array = array_creators[dtype_index](exported_data, sizeof(TensorMetadata), tensor_size);
+        if (dtype_index >= 0 &&
+            dtype_index < static_cast<int>(array_creators.size())) {
+            np_array = array_creators[dtype_index](
+                exported_data, sizeof(TensorMetadata), tensor_size);
         } else {
             LOG(ERROR) << "Unsupported dtype enum: " << dtype_index;
             return pybind11::none();

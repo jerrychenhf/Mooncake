@@ -302,6 +302,9 @@ class DistributedObjectStore {
         const std::vector<std::span<const char>> &values,
         const ReplicateConfig &config = ReplicateConfig{});
 
+    tl::expected<char*, ErrorCode> get_into_allocated_internal(
+        const std::string &key, uint64_t& data_length);
+
     tl::expected<void, ErrorCode> remove_internal(const std::string &key);
 
     tl::expected<int64_t, ErrorCode> removeAll_internal();
